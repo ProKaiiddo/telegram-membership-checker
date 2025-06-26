@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "routes": [
+    {
+      "src": "/api/check",
+      "methods": ["GET", "POST"],
+      "dest": "/api/check.js"
+    },
+    {
+      "src": "/",
+      "dest": "/api/check.js"
+    }
+  ]
+}
