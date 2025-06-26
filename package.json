@@ -1,0 +1,17 @@
+{
+  "name": "telegram-membership-checker",
+  "version": "1.0.0",
+  "description": "Telegram Membership Checker API",
+  "main": "api/check.js",
+  "scripts": {
+    "start": "node api/check.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.12.2",
+    "micro": "^9.4.0"
+  },
+  "engines": {
+    "node": ">=14.x"
+  },
+  "license": "MIT"
+}
