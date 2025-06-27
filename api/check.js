@@ -20,10 +20,15 @@ const isUsername = (identifier) => {
   return typeof identifier === 'string' && identifier.startsWith('@');
 };
 
+const cleanIdentifier = (id) => {
+  if (!id) return null;
+  return String(id).trim();
+};
+
 module.exports = async (req, res) => {
   try {
     // Handle root path request
-    if (req.url === '/') {
+    if (req.url === '/' || req.url === '/api/check' && req.method === 'GET' && !req.query.token) {
       return res.status(200).json(addSocialLinks({
         status: 'success',
         message: 'Telegram Membership Checker API',
@@ -34,6 +39,14 @@ module.exports = async (req, res) => {
             parameters: {
               required: ['token', 'user_id', 'chat_id or chat_ids'],
               optional: []
+            },
+            example: {
+              get: '/api/check?token=BOT_TOKEN&user_id=USER_ID&chat_ids=CHAT_ID1,CHAT_ID2',
+              post: {
+                token: 'BOT_TOKEN',
+                user_id: 'USER_ID',
+                chat_ids: ['CHAT_ID1', 'CHAT_ID2']
+              }
             }
           }
         },
@@ -58,18 +71,31 @@ module.exports = async (req, res) => {
       }
     }
 
+    // Extract parameters with proper cleaning
     if (method === 'GET') {
-      botToken = req.query.token;
-      userIdentifier = req.query.user_id;
-      chatIdentifiers = req.query.chat_ids ? 
-        req.query.chat_ids.split(',').map(item => item.trim()) : 
-        [req.query.chat_id.trim()];
+      botToken = cleanIdentifier(req.query.token);
+      userIdentifier = cleanIdentifier(req.query.user_id || req.query.user_name);
+      
+      // Handle both chat_id and chat_ids parameters
+      const chatIdParam = cleanIdentifier(req.query.chat_id);
+      const chatIdsParam = req.query.chat_ids 
+        ? req.query.chat_ids.split(',').map(cleanIdentifier).filter(Boolean)
+        : [];
+      
+      chatIdentifiers = chatIdParam ? [chatIdParam] : chatIdsParam;
     } else if (method === 'POST') {
-      botToken = body.token;
-      userIdentifier = body.user_id;
-      chatIdentifiers = body.chat_ids ? 
-        (Array.isArray(body.chat_ids) ? body.chat_ids : body.chat_ids.split(',').map(item => item.trim())) : 
-        [body.chat_id.trim()];
+      botToken = cleanIdentifier(body.token);
+      userIdentifier = cleanIdentifier(body.user_id || body.user_name);
+      
+      // Handle both chat_id and chat_ids parameters
+      const chatIdParam = cleanIdentifier(body.chat_id);
+      const chatIdsParam = Array.isArray(body.chat_ids) 
+        ? body.chat_ids.map(cleanIdentifier).filter(Boolean)
+        : typeof body.chat_ids === 'string' 
+          ? body.chat_ids.split(',').map(cleanIdentifier).filter(Boolean)
+          : [];
+      
+      chatIdentifiers = chatIdParam ? [chatIdParam] : chatIdsParam;
     } else {
       return res.status(405).json(addSocialLinks({
         status: 'error',
@@ -100,13 +126,13 @@ module.exports = async (req, res) => {
         code: 'MISSING_USER_ID',
         message: 'User identifier is required',
         details: {
-          parameter: 'user_id',
+          parameter: 'user_id or user_name',
           expected_format: 'Telegram user ID (number or string) or username (@username)'
         }
       }));
     }
 
-    if (!chatIdentifiers || chatIdentifiers.length === 0 || chatIdentifiers.some(id => !id)) {
+    if (!chatIdentifiers || chatIdentifiers.length === 0) {
       return res.status(400).json(addSocialLinks({
         status: 'error',
         code: 'MISSING_CHAT_IDS',
@@ -152,7 +178,8 @@ module.exports = async (req, res) => {
             chat_identifier: chatIdentifier,
             resolved_chat_id: chatId,
             code: 'USER_NOT_MEMBER',
-            message: `User is not a member of ${chatIdentifier}`
+            message: `User is not a member of ${chatIdentifier}`,
+            user_status: member.status
           });
         }
 
@@ -194,7 +221,8 @@ module.exports = async (req, res) => {
           errors.push({
             chat_identifier: chatIdentifier,
             code: 'UNKNOWN_ERROR',
-            message: error.message || `Unknown error occurred with ${chatIdentifier}`
+            message: error.message || `Unknown error occurred with ${chatIdentifier}`,
+            details: process.env.NODE_ENV === 'development' ? error.description : undefined
           });
         }
       }
@@ -202,7 +230,7 @@ module.exports = async (req, res) => {
 
     // Prepare response
     const response = addSocialLinks({
-      status: allSuccessful ? 'success' : 'partial_success',
+      status: allSuccessful ? 'success' : errors.length === chatIdentifiers.length ? 'error' : 'partial_success',
       is_member_in_all: allSuccessful,
       metadata: {
         user_identifier: userIdentifier,
@@ -230,6 +258,7 @@ module.exports = async (req, res) => {
       message: 'An unexpected error occurred',
       details: process.env.NODE_ENV === 'development' ? {
         error_message: error.message,
+        error_description: error.description,
         error_stack: error.stack
       } : undefined
     }));
