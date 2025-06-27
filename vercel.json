@@ -1,5 +1,11 @@
 {
   "version": 2,
+  "builds": [
+    {
+      "src": "api/check.js",
+      "use": "@vercel/node"
+    }
+  ],
   "routes": [
     {
       "src": "/api/check",
@@ -9,6 +15,12 @@
     {
       "src": "/",
       "dest": "/api/check.js"
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/api/check.js"
     }
   ]
 }
