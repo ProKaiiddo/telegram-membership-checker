@@ -1,3 +1,4 @@
+// api/check.js
 const { Telegraf } = require('telegraf');
 const { json } = require('micro');
 
@@ -13,6 +14,10 @@ const addSocialLinks = (response) => {
     ...response,
     social: SOCIAL_LINKS
   };
+};
+
+const isUsername = (identifier) => {
+  return typeof identifier === 'string' && identifier.startsWith('@');
 };
 
 module.exports = async (req, res) => {
@@ -38,7 +43,7 @@ module.exports = async (req, res) => {
 
     // Support GET, POST
     const method = req.method;
-    let botToken, userId, chatIds;
+    let botToken, userIdentifier, chatIdentifiers;
     let body = {};
 
     if (method === 'POST') {
@@ -55,12 +60,16 @@ module.exports = async (req, res) => {
 
     if (method === 'GET') {
       botToken = req.query.token;
-      userId = req.query.user_id;
-      chatIds = req.query.chat_ids ? req.query.chat_ids.split(',') : [req.query.chat_id];
+      userIdentifier = req.query.user_id;
+      chatIdentifiers = req.query.chat_ids ? 
+        req.query.chat_ids.split(',').map(item => item.trim()) : 
+        [req.query.chat_id.trim()];
     } else if (method === 'POST') {
       botToken = body.token;
-      userId = body.user_id;
-      chatIds = body.chat_ids ? (Array.isArray(body.chat_ids) ? body.chat_ids : body.chat_ids.split(',')) : [body.chat_id];
+      userIdentifier = body.user_id;
+      chatIdentifiers = body.chat_ids ? 
+        (Array.isArray(body.chat_ids) ? body.chat_ids : body.chat_ids.split(',').map(item => item.trim())) : 
+        [body.chat_id.trim()];
     } else {
       return res.status(405).json(addSocialLinks({
         status: 'error',
@@ -85,26 +94,26 @@ module.exports = async (req, res) => {
       }));
     }
 
-    if (!userId) {
+    if (!userIdentifier) {
       return res.status(400).json(addSocialLinks({
         status: 'error',
         code: 'MISSING_USER_ID',
-        message: 'User ID is required',
+        message: 'User identifier is required',
         details: {
           parameter: 'user_id',
-          expected_format: 'Telegram user ID (number or string)'
+          expected_format: 'Telegram user ID (number or string) or username (@username)'
         }
       }));
     }
 
-    if (!chatIds || chatIds.length === 0 || chatIds.some(id => !id)) {
+    if (!chatIdentifiers || chatIdentifiers.length === 0 || chatIdentifiers.some(id => !id)) {
       return res.status(400).json(addSocialLinks({
         status: 'error',
         code: 'MISSING_CHAT_IDS',
-        message: 'At least one chat ID is required',
+        message: 'At least one chat identifier is required',
         details: {
           parameter: 'chat_id or chat_ids',
-          expected_format: 'Single chat ID (string) or comma-separated list of chat IDs'
+          expected_format: 'Single chat ID/username or comma-separated list'
         }
       }));
     }
@@ -112,55 +121,80 @@ module.exports = async (req, res) => {
     // Initialize bot
     const bot = new Telegraf(botToken);
     
-    // Process all chat IDs
+    // Process all chat identifiers
     const results = [];
     const errors = [];
+    let allSuccessful = true;
     
-    for (const chatId of chatIds) {
+    for (const chatIdentifier of chatIdentifiers) {
       try {
+        // Resolve username to ID if needed
+        let chatId = chatIdentifier;
+        if (isUsername(chatIdentifier)) {
+          const chat = await bot.telegram.getChat(chatIdentifier);
+          chatId = chat.id;
+        }
+
+        // Resolve user identifier (ID or username)
+        let userId = userIdentifier;
+        if (isUsername(userIdentifier)) {
+          const user = await bot.telegram.getChat(userIdentifier);
+          userId = user.id;
+        }
+
         const member = await bot.telegram.getChatMember(chatId, userId);
         const isMember = ['member', 'administrator', 'creator'].includes(member.status);
         const isAdmin = ['administrator', 'creator'].includes(member.status);
         
+        if (!isMember) {
+          allSuccessful = false;
+          errors.push({
+            chat_identifier: chatIdentifier,
+            resolved_chat_id: chatId,
+            code: 'USER_NOT_MEMBER',
+            message: `User is not a member of ${chatIdentifier}`
+          });
+        }
+
         results.push({
-          chat_id: chatId,
+          chat_identifier: chatIdentifier,
+          resolved_chat_id: chatId,
           is_member: isMember,
           is_admin: isAdmin,
           user_status: member.status,
-          success: true
+          success: isMember
         });
       } catch (error) {
+        allSuccessful = false;
         if (error.description === 'Bad Request: user not found') {
-          results.push({
-            chat_id: chatId,
-            is_member: false,
-            is_admin: false,
-            user_status: 'non_member',
-            success: true
+          errors.push({
+            chat_identifier: chatIdentifier,
+            code: 'USER_NOT_FOUND',
+            message: `User ${userIdentifier} not found in ${chatIdentifier}`
           });
         } else if (error.description === 'Bad Request: chat not found') {
           errors.push({
-            chat_id: chatId,
+            chat_identifier: chatIdentifier,
             code: 'CHAT_NOT_FOUND',
-            message: 'The specified chat/channel was not found'
+            message: `Chat ${chatIdentifier} not found or bot has no access`
           });
         } else if (error.description === 'Bad Request: user_id invalid') {
           errors.push({
-            chat_id: chatId,
+            chat_identifier: chatIdentifier,
             code: 'INVALID_USER_ID',
-            message: 'The provided user ID is invalid'
+            message: `Invalid user identifier: ${userIdentifier}`
           });
         } else if (error.description === 'Bad Request: not enough rights') {
           errors.push({
-            chat_id: chatId,
+            chat_identifier: chatIdentifier,
             code: 'INSUFFICIENT_BOT_RIGHTS',
-            message: 'Bot does not have sufficient rights in this chat'
+            message: `Bot has insufficient rights in ${chatIdentifier}`
           });
         } else {
           errors.push({
-            chat_id: chatId,
+            chat_identifier: chatIdentifier,
             code: 'UNKNOWN_ERROR',
-            message: error.message || 'Unknown error occurred'
+            message: error.message || `Unknown error occurred with ${chatIdentifier}`
           });
         }
       }
@@ -168,11 +202,12 @@ module.exports = async (req, res) => {
 
     // Prepare response
     const response = addSocialLinks({
-      status: errors.length === 0 ? 'success' : 'partial_success',
+      status: allSuccessful ? 'success' : 'partial_success',
+      is_member_in_all: allSuccessful,
       metadata: {
-        user_id: userId,
-        chats_checked: chatIds.length,
-        chats_successful: results.length,
+        user_identifier: userIdentifier,
+        chats_checked: chatIdentifiers.length,
+        chats_successful: results.filter(r => r.success).length,
         chats_failed: errors.length,
         timestamp: new Date().toISOString()
       },
@@ -181,11 +216,9 @@ module.exports = async (req, res) => {
     });
 
     // Determine status code
-    let statusCode = 200;
-    if (errors.length > 0 && errors.length === chatIds.length) {
-      statusCode = 424; // Failed dependency
-    } else if (errors.length > 0) {
-      statusCode = 207; // Multi-status
+    let statusCode = allSuccessful ? 200 : 207;
+    if (errors.length === chatIdentifiers.length) {
+      statusCode = 424; // Failed dependency - all failed
     }
 
     return res.status(statusCode).json(response);
