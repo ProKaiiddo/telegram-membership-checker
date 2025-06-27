@@ -16,37 +16,34 @@ const addSocialLinks = (response) => {
   };
 };
 
-const isUsername = (identifier) => {
-  return typeof identifier === 'string' && identifier.startsWith('@');
-};
-
-const cleanIdentifier = (id) => {
-  if (!id) return null;
-  return String(id).trim();
+const cleanChatIdentifiers = (input) => {
+  if (!input) return [];
+  if (Array.isArray(input)) {
+    return input.map(id => String(id).trim()).filter(id => id.startsWith('@'));
+  }
+  return String(input).split(',')
+    .map(id => id.trim())
+    .filter(id => id.startsWith('@'));
 };
 
 module.exports = async (req, res) => {
   try {
     // Handle root path request
-    if (req.url === '/' || req.url === '/api/check' && req.method === 'GET' && !req.query.token) {
+    if (req.url === '/' || (req.url === '/api/check' && req.method === 'GET' && !req.query.token)) {
       return res.status(200).json(addSocialLinks({
         status: 'success',
-        message: 'Telegram Membership Checker API',
+        message: 'Telegram Membership Checker API (Public Channels/Groups Only)',
         endpoints: {
           check_membership: {
             method: ['GET', 'POST'],
             path: '/api/check',
             parameters: {
-              required: ['token', 'user_id', 'chat_id or chat_ids'],
-              optional: []
-            },
-            example: {
-              get: '/api/check?token=BOT_TOKEN&user_id=USER_ID&chat_ids=CHAT_ID1,CHAT_ID2',
-              post: {
-                token: 'BOT_TOKEN',
-                user_id: 'USER_ID',
-                chat_ids: ['CHAT_ID1', 'CHAT_ID2']
-              }
+              required: [
+                'token (Bot Token)',
+                'user_id (Numeric User ID only)',
+                'chat_id or chat_ids (Channel/Group usernames with @ prefix)'
+              ],
+              example_request: '/api/check?token=BOT_TOKEN&user_id=123456789&chat_ids=@channel1,@group1'
             }
           }
         },
@@ -56,7 +53,7 @@ module.exports = async (req, res) => {
 
     // Support GET, POST
     const method = req.method;
-    let botToken, userIdentifier, chatIdentifiers;
+    let botToken, userId, chatUsernames;
     let body = {};
 
     if (method === 'POST') {
@@ -71,39 +68,20 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Extract parameters with proper cleaning
+    // Extract and validate parameters
     if (method === 'GET') {
-      botToken = cleanIdentifier(req.query.token);
-      userIdentifier = cleanIdentifier(req.query.user_id || req.query.user_name);
-      
-      // Handle both chat_id and chat_ids parameters
-      const chatIdParam = cleanIdentifier(req.query.chat_id);
-      const chatIdsParam = req.query.chat_ids 
-        ? req.query.chat_ids.split(',').map(cleanIdentifier).filter(Boolean)
-        : [];
-      
-      chatIdentifiers = chatIdParam ? [chatIdParam] : chatIdsParam;
+      botToken = req.query.token?.trim();
+      userId = parseInt(req.query.user_id);
+      chatUsernames = cleanChatIdentifiers(req.query.chat_id || req.query.chat_ids);
     } else if (method === 'POST') {
-      botToken = cleanIdentifier(body.token);
-      userIdentifier = cleanIdentifier(body.user_id || body.user_name);
-      
-      // Handle both chat_id and chat_ids parameters
-      const chatIdParam = cleanIdentifier(body.chat_id);
-      const chatIdsParam = Array.isArray(body.chat_ids) 
-        ? body.chat_ids.map(cleanIdentifier).filter(Boolean)
-        : typeof body.chat_ids === 'string' 
-          ? body.chat_ids.split(',').map(cleanIdentifier).filter(Boolean)
-          : [];
-      
-      chatIdentifiers = chatIdParam ? [chatIdParam] : chatIdsParam;
+      botToken = body.token?.trim();
+      userId = parseInt(body.user_id);
+      chatUsernames = cleanChatIdentifiers(body.chat_id || body.chat_ids);
     } else {
       return res.status(405).json(addSocialLinks({
         status: 'error',
         code: 'METHOD_NOT_ALLOWED',
-        message: 'Only GET and POST methods are allowed',
-        details: {
-          allowed_methods: ['GET', 'POST']
-        }
+        message: 'Only GET and POST methods are allowed'
       }));
     }
 
@@ -112,34 +90,25 @@ module.exports = async (req, res) => {
       return res.status(400).json(addSocialLinks({
         status: 'error',
         code: 'MISSING_BOT_TOKEN',
-        message: 'Bot token is required',
-        details: {
-          parameter: 'token',
-          expected_format: 'Telegram bot token (string)'
-        }
+        message: 'Bot token is required'
       }));
     }
 
-    if (!userIdentifier) {
+    if (!userId || isNaN(userId)) {
       return res.status(400).json(addSocialLinks({
         status: 'error',
-        code: 'MISSING_USER_ID',
-        message: 'User identifier is required',
-        details: {
-          parameter: 'user_id or user_name',
-          expected_format: 'Telegram user ID (number or string) or username (@username)'
-        }
+        code: 'INVALID_USER_ID',
+        message: 'Valid numeric user ID is required'
       }));
     }
 
-    if (!chatIdentifiers || chatIdentifiers.length === 0) {
+    if (chatUsernames.length === 0) {
       return res.status(400).json(addSocialLinks({
         status: 'error',
-        code: 'MISSING_CHAT_IDS',
-        message: 'At least one chat identifier is required',
+        code: 'INVALID_CHAT_USERNAMES',
+        message: 'At least one valid channel/group username (@username) is required',
         details: {
-          parameter: 'chat_id or chat_ids',
-          expected_format: 'Single chat ID/username or comma-separated list'
+          example: '@channel1,@group1'
         }
       }));
     }
@@ -147,45 +116,39 @@ module.exports = async (req, res) => {
     // Initialize bot
     const bot = new Telegraf(botToken);
     
-    // Process all chat identifiers
+    // Process all chat usernames
     const results = [];
     const errors = [];
     let allSuccessful = true;
     
-    for (const chatIdentifier of chatIdentifiers) {
+    for (const chatUsername of chatUsernames) {
       try {
-        // Resolve username to ID if needed
-        let chatId = chatIdentifier;
-        if (isUsername(chatIdentifier)) {
-          const chat = await bot.telegram.getChat(chatIdentifier);
-          chatId = chat.id;
+        // Get chat info to verify it's public
+        const chat = await bot.telegram.getChat(chatUsername);
+        
+        if (chat.type !== 'channel' && chat.type !== 'supergroup') {
+          throw new Error('Only public channels and groups are supported');
         }
 
-        // Resolve user identifier (ID or username)
-        let userId = userIdentifier;
-        if (isUsername(userIdentifier)) {
-          const user = await bot.telegram.getChat(userIdentifier);
-          userId = user.id;
-        }
-
-        const member = await bot.telegram.getChatMember(chatId, userId);
+        // Check membership
+        const member = await bot.telegram.getChatMember(chat.id, userId);
         const isMember = ['member', 'administrator', 'creator'].includes(member.status);
         const isAdmin = ['administrator', 'creator'].includes(member.status);
         
         if (!isMember) {
           allSuccessful = false;
           errors.push({
-            chat_identifier: chatIdentifier,
-            resolved_chat_id: chatId,
+            chat_username: chatUsername,
             code: 'USER_NOT_MEMBER',
-            message: `User is not a member of ${chatIdentifier}`,
+            message: `User is not a member of ${chatUsername}`,
             user_status: member.status
           });
         }
 
         results.push({
-          chat_identifier: chatIdentifier,
-          resolved_chat_id: chatId,
+          chat_username: chatUsername,
+          chat_title: chat.title,
+          chat_type: chat.type,
           is_member: isMember,
           is_admin: isAdmin,
           user_status: member.status,
@@ -195,33 +158,27 @@ module.exports = async (req, res) => {
         allSuccessful = false;
         if (error.description === 'Bad Request: user not found') {
           errors.push({
-            chat_identifier: chatIdentifier,
+            chat_username: chatUsername,
             code: 'USER_NOT_FOUND',
-            message: `User ${userIdentifier} not found in ${chatIdentifier}`
+            message: `User not found in ${chatUsername}`
           });
         } else if (error.description === 'Bad Request: chat not found') {
           errors.push({
-            chat_identifier: chatIdentifier,
+            chat_username: chatUsername,
             code: 'CHAT_NOT_FOUND',
-            message: `Chat ${chatIdentifier} not found or bot has no access`
-          });
-        } else if (error.description === 'Bad Request: user_id invalid') {
-          errors.push({
-            chat_identifier: chatIdentifier,
-            code: 'INVALID_USER_ID',
-            message: `Invalid user identifier: ${userIdentifier}`
+            message: `${chatUsername} not found or not public`
           });
         } else if (error.description === 'Bad Request: not enough rights') {
           errors.push({
-            chat_identifier: chatIdentifier,
+            chat_username: chatUsername,
             code: 'INSUFFICIENT_BOT_RIGHTS',
-            message: `Bot has insufficient rights in ${chatIdentifier}`
+            message: `Bot needs to join ${chatUsername} first`
           });
         } else {
           errors.push({
-            chat_identifier: chatIdentifier,
+            chat_username: chatUsername,
             code: 'UNKNOWN_ERROR',
-            message: error.message || `Unknown error occurred with ${chatIdentifier}`,
+            message: error.message || `Error checking ${chatUsername}`,
             details: process.env.NODE_ENV === 'development' ? error.description : undefined
           });
         }
@@ -230,11 +187,11 @@ module.exports = async (req, res) => {
 
     // Prepare response
     const response = addSocialLinks({
-      status: allSuccessful ? 'success' : errors.length === chatIdentifiers.length ? 'error' : 'partial_success',
+      status: allSuccessful ? 'success' : errors.length === chatUsernames.length ? 'error' : 'partial_success',
       is_member_in_all: allSuccessful,
       metadata: {
-        user_identifier: userIdentifier,
-        chats_checked: chatIdentifiers.length,
+        user_id: userId,
+        chats_checked: chatUsernames.length,
         chats_successful: results.filter(r => r.success).length,
         chats_failed: errors.length,
         timestamp: new Date().toISOString()
@@ -243,13 +200,7 @@ module.exports = async (req, res) => {
       errors: errors.length > 0 ? errors : undefined
     });
 
-    // Determine status code
-    let statusCode = allSuccessful ? 200 : 207;
-    if (errors.length === chatIdentifiers.length) {
-      statusCode = 424; // Failed dependency - all failed
-    }
-
-    return res.status(statusCode).json(response);
+    return res.status(allSuccessful ? 200 : errors.length === chatUsernames.length ? 424 : 207).json(response);
   } catch (error) {
     console.error('Unexpected Error:', error);
     return res.status(500).json(addSocialLinks({
