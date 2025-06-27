@@ -14,12 +14,13 @@ const addSocialLinks = (response) => ({
   social: SOCIAL_LINKS
 });
 
+// Clean and normalize chat IDs (remove @ and trim)
 const cleanChatIdentifiers = (input) => {
   if (!input) return [];
   return String(input)
     .split(',')
-    .map(id => id.trim())
-    .filter(id => id.length > 1 && id.startsWith('@'));
+    .map(id => id.trim().replace(/^@/, '')) // remove @ if present
+    .filter(id => id.length > 3); // ensure valid name length
 };
 
 module.exports = async (req, res) => {
@@ -28,26 +29,26 @@ module.exports = async (req, res) => {
     let botToken, userId, chatUsernames = [];
     let body = {};
 
-    // Root info handler
+    // Help page
     if (req.url === '/' || (req.url.startsWith('/api/check') && method === 'GET' && !req.url.includes('token='))) {
       return res.status(200).json(addSocialLinks({
         status: 'success',
-        message: 'Telegram Membership Checker API (Public Channels/Groups Only)',
+        message: 'Telegram Membership Checker API',
         endpoints: {
           check_membership: {
             method: ['GET', 'POST'],
             path: '/api/check',
             parameters: {
               required: ['token', 'user_id', 'chat_id or chat_ids'],
-              example: '/api/check?token=BOT_TOKEN&user_id=123456789&chat_ids=@channel1,@group1'
+              example: '/api/check?token=BOT_TOKEN&user_id=123456789&chat_ids=channel1,group1'
             }
           }
         },
-        version: '1.1.0'
+        version: '1.2.0'
       }));
     }
 
-    // Read GET params using URL class (for Vercel compatibility)
+    // Handle GET (use URL parsing for Vercel compatibility)
     if (method === 'GET') {
       const url = new URL(req.url, `http://${req.headers.host}`);
       const params = url.searchParams;
@@ -57,7 +58,7 @@ module.exports = async (req, res) => {
       chatUsernames = cleanChatIdentifiers(params.get('chat_id') || params.get('chat_ids'));
     }
 
-    // Read POST params
+    // Handle POST
     else if (method === 'POST') {
       try {
         body = await json(req);
@@ -73,16 +74,16 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Only allow GET and POST
+    // Block unsupported methods
     else {
       return res.status(405).json(addSocialLinks({
         status: 'error',
         code: 'METHOD_NOT_ALLOWED',
-        message: 'Only GET and POST methods are supported'
+        message: 'Only GET and POST methods supported'
       }));
     }
 
-    // Validation
+    // Validate parameters
     if (!botToken || !userId || isNaN(userId) || chatUsernames.length === 0) {
       return res.status(400).json(addSocialLinks({
         status: 'error',
@@ -90,17 +91,20 @@ module.exports = async (req, res) => {
       }));
     }
 
+    // Init Bot
     const bot = new Telegraf(botToken);
     const results = [];
     const errors = [];
     let allSuccessful = true;
 
-    for (const chatUsername of chatUsernames) {
+    for (const chatName of chatUsernames) {
+      const chatUsername = '@' + chatName; // Telegram needs '@' prefix
+
       try {
         const chat = await bot.telegram.getChat(chatUsername);
 
         if (!['channel', 'supergroup', 'group'].includes(chat.type)) {
-          throw new Error('Only public channels/groups supported');
+          throw new Error('Only public groups or channels supported');
         }
 
         const member = await bot.telegram.getChatMember(chat.id, userId);
@@ -133,19 +137,19 @@ module.exports = async (req, res) => {
           errors.push({
             chat_username: chatUsername,
             code: 'CHAT_NOT_FOUND',
-            message: `${chatUsername} does not exist or bot isn’t a member`
+            message: `${chatUsername} not found or bot not a member`
           });
         } else if (msg.includes('user not found')) {
           errors.push({
             chat_username: chatUsername,
             code: 'USER_NOT_FOUND',
-            message: `User not found or not visible in ${chatUsername}`
+            message: `User not found in ${chatUsername}`
           });
         } else if (msg.includes('not enough rights')) {
           errors.push({
             chat_username: chatUsername,
             code: 'BOT_NOT_ADMIN',
-            message: `Bot lacks rights to check ${chatUsername}`
+            message: `Bot lacks rights to access ${chatUsername}`
           });
         } else {
           errors.push({
