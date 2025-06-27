@@ -1,6 +1,6 @@
-// api/check.js
 const { Telegraf } = require('telegraf');
 const { json } = require('micro');
+const { URL } = require('url');
 
 const SOCIAL_LINKS = {
   developer: "@Kaiiddo on Telegram",
@@ -14,7 +14,6 @@ const addSocialLinks = (response) => ({
   social: SOCIAL_LINKS
 });
 
-// Clean chat usernames properly
 const cleanChatIdentifiers = (input) => {
   if (!input) return [];
   return String(input)
@@ -25,7 +24,12 @@ const cleanChatIdentifiers = (input) => {
 
 module.exports = async (req, res) => {
   try {
-    if (req.url === '/' || (req.url === '/api/check' && req.method === 'GET' && !req.query.token)) {
+    const method = req.method;
+    let botToken, userId, chatUsernames = [];
+    let body = {};
+
+    // Root info handler
+    if (req.url === '/' || (req.url.startsWith('/api/check') && method === 'GET' && !req.url.includes('token='))) {
       return res.status(200).json(addSocialLinks({
         status: 'success',
         message: 'Telegram Membership Checker API (Public Channels/Groups Only)',
@@ -34,11 +38,7 @@ module.exports = async (req, res) => {
             method: ['GET', 'POST'],
             path: '/api/check',
             parameters: {
-              required: [
-                'token (Bot Token)',
-                'user_id (Numeric User ID only)',
-                'chat_id or chat_ids (Comma-separated @usernames)'
-              ],
+              required: ['token', 'user_id', 'chat_id or chat_ids'],
               example: '/api/check?token=BOT_TOKEN&user_id=123456789&chat_ids=@channel1,@group1'
             }
           }
@@ -47,13 +47,23 @@ module.exports = async (req, res) => {
       }));
     }
 
-    const method = req.method;
-    let botToken, userId, chatUsernames = [];
-    let body = {};
+    // Read GET params using URL class (for Vercel compatibility)
+    if (method === 'GET') {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const params = url.searchParams;
 
-    if (method === 'POST') {
+      botToken = params.get('token')?.trim();
+      userId = parseInt(params.get('user_id'));
+      chatUsernames = cleanChatIdentifiers(params.get('chat_id') || params.get('chat_ids'));
+    }
+
+    // Read POST params
+    else if (method === 'POST') {
       try {
         body = await json(req);
+        botToken = body.token?.trim();
+        userId = parseInt(body.user_id);
+        chatUsernames = cleanChatIdentifiers(body.chat_id || body.chat_ids);
       } catch {
         return res.status(400).json(addSocialLinks({
           status: 'error',
@@ -63,43 +73,20 @@ module.exports = async (req, res) => {
       }
     }
 
-    if (method === 'GET') {
-      botToken = req.query.token?.trim();
-      userId = parseInt(req.query.user_id);
-      chatUsernames = cleanChatIdentifiers(req.query.chat_id || req.query.chat_ids);
-    } else if (method === 'POST') {
-      botToken = body.token?.trim();
-      userId = parseInt(body.user_id);
-      chatUsernames = cleanChatIdentifiers(body.chat_id || body.chat_ids);
-    } else {
+    // Only allow GET and POST
+    else {
       return res.status(405).json(addSocialLinks({
         status: 'error',
         code: 'METHOD_NOT_ALLOWED',
-        message: 'Only GET and POST supported'
+        message: 'Only GET and POST methods are supported'
       }));
     }
 
-    if (!botToken) {
+    // Validation
+    if (!botToken || !userId || isNaN(userId) || chatUsernames.length === 0) {
       return res.status(400).json(addSocialLinks({
         status: 'error',
-        code: 'MISSING_TOKEN',
-        message: 'Bot token is required'
-      }));
-    }
-
-    if (!userId || isNaN(userId)) {
-      return res.status(400).json(addSocialLinks({
-        status: 'error',
-        code: 'INVALID_USER_ID',
-        message: 'Valid numeric user ID is required'
-      }));
-    }
-
-    if (chatUsernames.length === 0) {
-      return res.status(400).json(addSocialLinks({
-        status: 'error',
-        code: 'NO_CHAT_IDS',
-        message: 'Provide at least one valid @chat_id'
+        message: 'Missing required parameters: token, user_id, or chat_id'
       }));
     }
 
@@ -113,7 +100,7 @@ module.exports = async (req, res) => {
         const chat = await bot.telegram.getChat(chatUsername);
 
         if (!['channel', 'supergroup', 'group'].includes(chat.type)) {
-          throw new Error('Only public groups or channels are allowed');
+          throw new Error('Only public channels/groups supported');
         }
 
         const member = await bot.telegram.getChatMember(chat.id, userId);
@@ -141,7 +128,6 @@ module.exports = async (req, res) => {
 
       } catch (error) {
         allSuccessful = false;
-
         const msg = error.description || error.message;
         if (msg.includes('chat not found')) {
           errors.push({
@@ -153,7 +139,7 @@ module.exports = async (req, res) => {
           errors.push({
             chat_username: chatUsername,
             code: 'USER_NOT_FOUND',
-            message: `User does not exist or is not visible in ${chatUsername}`
+            message: `User not found or not visible in ${chatUsername}`
           });
         } else if (msg.includes('not enough rights')) {
           errors.push({
@@ -171,7 +157,7 @@ module.exports = async (req, res) => {
       }
     }
 
-    const response = addSocialLinks({
+    return res.status(allSuccessful ? 200 : errors.length === chatUsernames.length ? 424 : 207).json(addSocialLinks({
       status: allSuccessful ? 'success' : errors.length === chatUsernames.length ? 'error' : 'partial_success',
       is_member_in_all: allSuccessful,
       metadata: {
@@ -183,16 +169,13 @@ module.exports = async (req, res) => {
       },
       results,
       errors: errors.length ? errors : undefined
-    });
-
-    return res.status(allSuccessful ? 200 : errors.length === chatUsernames.length ? 424 : 207).json(response);
-
-  } catch (error) {
-    console.error('Internal Error:', error);
+    }));
+  } catch (err) {
+    console.error('Unexpected Error:', err);
     return res.status(500).json(addSocialLinks({
       status: 'error',
       code: 'INTERNAL_SERVER_ERROR',
-      message: 'Something went wrong on the server'
+      message: 'Unexpected server error'
     }));
   }
 };
