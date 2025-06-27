@@ -1,3 +1,4 @@
+// api/check.js
 const { Telegraf } = require('telegraf');
 const { json } = require('micro');
 const { URL } = require('url');
@@ -14,172 +15,109 @@ const addSocialLinks = (response) => ({
   social: SOCIAL_LINKS
 });
 
-// Clean and normalize chat IDs (remove @ and trim)
-const cleanChatIdentifiers = (input) => {
-  if (!input) return [];
-  return String(input)
-    .split(',')
-    .map(id => id.trim().replace(/^@/, '')) // remove @ if present
-    .filter(id => id.length > 3); // ensure valid name length
+// Clean input and remove @
+const cleanChatIdentifier = (input) => {
+  if (!input) return null;
+  return input.trim().replace(/^@/, '');
 };
 
 module.exports = async (req, res) => {
   try {
     const method = req.method;
-    let botToken, userId, chatUsernames = [];
+    let botToken, userId, chatUsername;
     let body = {};
 
-    // Help page
+    // Root help page
     if (req.url === '/' || (req.url.startsWith('/api/check') && method === 'GET' && !req.url.includes('token='))) {
       return res.status(200).json(addSocialLinks({
         status: 'success',
         message: 'Telegram Membership Checker API',
-        endpoints: {
-          check_membership: {
-            method: ['GET', 'POST'],
-            path: '/api/check',
-            parameters: {
-              required: ['token', 'user_id', 'chat_id or chat_ids'],
-              example: '/api/check?token=BOT_TOKEN&user_id=123456789&chat_ids=channel1,group1'
-            }
-          }
-        },
-        version: '1.2.0'
+        usage: '/api/check?token=BOT_TOKEN&user_id=123456789&chat_id=JunnioMarket',
+        note: 'Remove "@" — it is handled automatically.',
+        method: ['GET', 'POST'],
+        version: '1.3.0'
       }));
     }
 
-    // Handle GET (use URL parsing for Vercel compatibility)
+    // ✅ Handle GET (Vercel compatible)
     if (method === 'GET') {
       const url = new URL(req.url, `http://${req.headers.host}`);
       const params = url.searchParams;
 
       botToken = params.get('token')?.trim();
       userId = parseInt(params.get('user_id'));
-      chatUsernames = cleanChatIdentifiers(params.get('chat_id') || params.get('chat_ids'));
+      chatUsername = cleanChatIdentifier(params.get('chat_id'));
     }
 
-    // Handle POST
+    // ✅ Handle POST (use micro's json parser for Vercel)
     else if (method === 'POST') {
       try {
         body = await json(req);
         botToken = body.token?.trim();
         userId = parseInt(body.user_id);
-        chatUsernames = cleanChatIdentifiers(body.chat_id || body.chat_ids);
+        chatUsername = cleanChatIdentifier(body.chat_id);
       } catch {
         return res.status(400).json(addSocialLinks({
           status: 'error',
           code: 'INVALID_JSON',
-          message: 'Invalid JSON payload'
+          message: 'Invalid JSON body.'
         }));
       }
     }
 
-    // Block unsupported methods
+    // ❌ Invalid method
     else {
       return res.status(405).json(addSocialLinks({
         status: 'error',
         code: 'METHOD_NOT_ALLOWED',
-        message: 'Only GET and POST methods supported'
+        message: 'Only GET and POST supported.'
       }));
     }
 
-    // Validate parameters
-    if (!botToken || !userId || isNaN(userId) || chatUsernames.length === 0) {
+    // ❗ Missing fields
+    if (!botToken || !userId || isNaN(userId) || !chatUsername) {
       return res.status(400).json(addSocialLinks({
         status: 'error',
-        message: 'Missing required parameters: token, user_id, or chat_id'
+        message: 'Missing required parameters: token, user_id, or chat_id.'
       }));
     }
 
-    // Init Bot
     const bot = new Telegraf(botToken);
-    const results = [];
-    const errors = [];
-    let allSuccessful = true;
+    const fullChatUsername = '@' + chatUsername;
 
-    for (const chatName of chatUsernames) {
-      const chatUsername = '@' + chatName; // Telegram needs '@' prefix
+    try {
+      const chat = await bot.telegram.getChat(fullChatUsername);
+      const member = await bot.telegram.getChatMember(chat.id, userId);
+      const isMember = ['creator', 'administrator', 'member'].includes(member.status);
+      const isAdmin = ['creator', 'administrator'].includes(member.status);
 
-      try {
-        const chat = await bot.telegram.getChat(chatUsername);
-
-        if (!['channel', 'supergroup', 'group'].includes(chat.type)) {
-          throw new Error('Only public groups or channels supported');
+      return res.status(200).json(addSocialLinks({
+        status: 'success',
+        is_member: isMember,
+        is_admin: isAdmin,
+        user_status: member.status,
+        chat: {
+          username: fullChatUsername,
+          title: chat.title,
+          type: chat.type
         }
+      }));
+    } catch (error) {
+      const msg = error.description || error.message || 'Unknown error';
 
-        const member = await bot.telegram.getChatMember(chat.id, userId);
-        const isMember = ['creator', 'administrator', 'member'].includes(member.status);
-        const isAdmin = ['creator', 'administrator'].includes(member.status);
-
-        if (!isMember) {
-          allSuccessful = false;
-          errors.push({
-            chat_username: chatUsername,
-            code: 'NOT_MEMBER',
-            message: `User is not a member of ${chatUsername}`,
-            user_status: member.status
-          });
-        }
-
-        results.push({
-          chat_username: chatUsername,
-          chat_title: chat.title,
-          is_member: isMember,
-          is_admin: isAdmin,
-          user_status: member.status,
-          success: isMember
-        });
-
-      } catch (error) {
-        allSuccessful = false;
-        const msg = error.description || error.message;
-        if (msg.includes('chat not found')) {
-          errors.push({
-            chat_username: chatUsername,
-            code: 'CHAT_NOT_FOUND',
-            message: `${chatUsername} not found or bot not a member`
-          });
-        } else if (msg.includes('user not found')) {
-          errors.push({
-            chat_username: chatUsername,
-            code: 'USER_NOT_FOUND',
-            message: `User not found in ${chatUsername}`
-          });
-        } else if (msg.includes('not enough rights')) {
-          errors.push({
-            chat_username: chatUsername,
-            code: 'BOT_NOT_ADMIN',
-            message: `Bot lacks rights to access ${chatUsername}`
-          });
-        } else {
-          errors.push({
-            chat_username: chatUsername,
-            code: 'UNKNOWN_ERROR',
-            message: `Failed to check ${chatUsername}: ${msg}`
-          });
-        }
-      }
+      return res.status(400).json(addSocialLinks({
+        status: 'error',
+        code: 'MEMBERSHIP_CHECK_FAILED',
+        message: msg
+      }));
     }
 
-    return res.status(allSuccessful ? 200 : errors.length === chatUsernames.length ? 424 : 207).json(addSocialLinks({
-      status: allSuccessful ? 'success' : errors.length === chatUsernames.length ? 'error' : 'partial_success',
-      is_member_in_all: allSuccessful,
-      metadata: {
-        user_id: userId,
-        chats_checked: chatUsernames.length,
-        chats_successful: results.filter(r => r.success).length,
-        chats_failed: errors.length,
-        timestamp: new Date().toISOString()
-      },
-      results,
-      errors: errors.length ? errors : undefined
-    }));
   } catch (err) {
-    console.error('Unexpected Error:', err);
+    console.error('Unexpected error:', err);
     return res.status(500).json(addSocialLinks({
       status: 'error',
-      code: 'INTERNAL_SERVER_ERROR',
-      message: 'Unexpected server error'
+      code: 'INTERNAL_ERROR',
+      message: 'An unexpected error occurred.'
     }));
   }
 };
