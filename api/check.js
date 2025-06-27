@@ -7,7 +7,8 @@ const SOCIAL_LINKS = {
   developer: "@Kaiiddo on Telegram",
   youtube: "@Kaiiddo",
   twitter: "@HelloKaiiddo",
-  github: "ProKaiiddo"
+  github: "ProKaiiddo",
+  bsky: "kaiiddo.bsky.social"
 };
 
 const addSocialLinks = (response) => ({
